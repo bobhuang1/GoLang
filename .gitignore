@@ -1,0 +1,14 @@
+# Build artifacts
+bin/
+server
+
+# Env
+.env
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
+# Logs
+*.log
