@@ -113,3 +113,7 @@ internal/{customer,product,cart,order,payment,shipping}/  domain packages
 ```bash
 go test ./...   # state machines, gateway stub, backoff maths
 ```
+
+## License
+
+This project is free software, released under the **GNU General Public License v3.0**. You may redistribute and/or modify it under those terms; see [LICENSE.md](LICENSE.md) for the full text.
