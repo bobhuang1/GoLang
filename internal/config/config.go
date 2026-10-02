@@ -6,6 +6,10 @@ import (
 	"time"
 )
 
+// DefaultJWTSecret is the development fallback for JWT_SECRET. The server refuses to
+// start with it outside demo mode.
+const DefaultJWTSecret = "dev-secret-change-me"
+
 // Config holds every runtime knob of the server.
 type Config struct {
 	HTTPAddr              string
@@ -26,7 +30,7 @@ func FromEnv() Config {
 		DatabaseURL:           getenv("DATABASE_URL", "postgres://shop:shop@localhost:5432/shop?sslmode=disable"),
 		RedisAddr:             getenv("REDIS_ADDR", "localhost:6379"),
 		RedisPassword:         os.Getenv("REDIS_PASSWORD"),
-		JWTSecret:             getenv("JWT_SECRET", "dev-secret-change-me"),
+		JWTSecret:             getenv("JWT_SECRET", DefaultJWTSecret),
 		JWTTTL:                time.Duration(getenvInt("JWT_TTL_MINUTES", 60)) * time.Minute,
 		JWTChallengeTTL:       time.Duration(getenvInt("JWT_CHALLENGE_TTL_MINUTES", 5)) * time.Minute,
 		MaxPaymentAttempts:    getenvInt("MAX_PAYMENT_ATTEMPTS", 4),

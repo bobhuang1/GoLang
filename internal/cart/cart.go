@@ -231,7 +231,7 @@ func (s *Service) Checkout(ctx context.Context, customerID int64, idemKey string
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			// Same idempotency key: replay the already-created order instead of
 			// duplicating it.
-			return s.replayOrder(ctx, idemKey)
+			return s.replayOrder(ctx, customerID, idemKey)
 		}
 		return nil, httpx.Wrap(err)
 	}
@@ -250,12 +250,14 @@ func (s *Service) Checkout(ctx context.Context, customerID int64, idemKey string
 	return &order.View{Order: *o, Items: reserved}, nil
 }
 
-// replayOrder returns the already-created order for a repeated checkout key.
-func (s *Service) replayOrder(ctx context.Context, idemKey string) (*order.View, error) {
+// replayOrder returns this customer's already-created order for a repeated checkout
+// key. Keys are client-chosen and unique per customer, so the lookup is scoped to the
+// caller: another customer's order is never returned.
+func (s *Service) replayOrder(ctx context.Context, customerID int64, idemKey string) (*order.View, error) {
 	var o order.Order
 	err := s.pool.QueryRow(ctx, `
 		SELECT id, customer_id, status, total_cents, currency, version, created_at, updated_at
-		FROM orders WHERE idempotency_key = $1`, idemKey,
+		FROM orders WHERE idempotency_key = $1 AND customer_id = $2`, idemKey, customerID,
 	).Scan(&o.ID, &o.CustomerID, &o.Status, &o.TotalCents, &o.Currency, &o.Version, &o.CreatedAt, &o.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

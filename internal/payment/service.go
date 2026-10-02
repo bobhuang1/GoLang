@@ -122,9 +122,12 @@ func (s *Service) chargeOnce(ctx context.Context, orderID, customerID int64, ide
 	// process was interrupted mid-flight after a transient failure — resume it
 	// below by re-invoking the provider under the same idempotency key instead
 	// of replaying a stale pending row to the caller.
-	replayed, err := s.findChargeByKey(ctx, idemKey)
+	replayed, err := s.findChargeByKey(ctx, customerID, idemKey)
 	if err != nil {
 		return nil, err
+	}
+	if replayed != nil && replayed.OrderID != orderID {
+		return nil, httpx.Conflict("this Idempotency-Key was already used for a different order")
 	}
 	if replayed != nil && (replayed.Status != ChargePending || replayed.ProviderCharge != "") {
 		return replayed, nil
@@ -151,7 +154,7 @@ func (s *Service) chargeOnce(ctx context.Context, orderID, customerID int64, ide
 		var oStatus string
 		if err := tx.QueryRow(ctx, `
 			SELECT status, total_cents, currency FROM orders
-			WHERE id = $1 FOR UPDATE`, orderID,
+			WHERE id = $1 AND customer_id = $2 FOR UPDATE`, orderID, customerID,
 		).Scan(&oStatus, &amount, &currency); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, httpx.NotFound("order not found")
@@ -309,12 +312,14 @@ func (s *Service) markChargeTransient(ctx context.Context, chargeID, reason stri
 }
 
 // findChargeByKey replays a previously claimed charge, if the key is known.
-func (s *Service) findChargeByKey(ctx context.Context, idemKey string) (*Charge, error) {
+// findChargeByKey looks the key up for this customer only: keys are client-chosen, so
+// a global lookup would hand one customer another customer's charge.
+func (s *Service) findChargeByKey(ctx context.Context, customerID int64, idemKey string) (*Charge, error) {
 	var c Charge
 	err := s.pool.QueryRow(ctx, `
 		SELECT id::text, order_id, customer_id, amount_cents, currency, status, provider_charge_id,
 		       failure_reason, idempotency_key, created_at
-		FROM charges WHERE idempotency_key = $1`, idemKey,
+		FROM charges WHERE idempotency_key = $1 AND customer_id = $2`, idemKey, customerID,
 	).Scan(&c.ID, &c.OrderID, &c.CustomerID, &c.AmountCents, &c.Currency, &c.Status,
 		&c.ProviderCharge, &c.FailureReason, &c.IdempotencyKey, &c.CreatedAt)
 	if err != nil {
@@ -410,6 +415,18 @@ func (s *Service) Refund(ctx context.Context, orderID, actingCustomer int64, amo
 	if !admin && charge.CustomerID != actingCustomer {
 		return nil, httpx.Forbidden("not allowed to refund this order")
 	}
+	// A customer may cancel-and-refund only before fulfilment starts. Once the order is
+	// processing, shipped or delivered, a refund is an admin (returns) decision -
+	// otherwise a customer could pay, receive the goods and refund themselves.
+	if !admin {
+		var orderStatus string
+		if err := s.pool.QueryRow(ctx, `SELECT status FROM orders WHERE id = $1`, orderID).Scan(&orderStatus); err != nil {
+			return nil, httpx.Wrap(err)
+		}
+		if orderStatus != "paid" {
+			return nil, httpx.Conflict(fmt.Sprintf("orders in status %s can only be refunded by an administrator", orderStatus))
+		}
+	}
 	if charge.Status == ChargeFailed || charge.Status == ChargePending {
 		return nil, httpx.Conflict("charge has no collected funds to refund")
 	}
@@ -455,7 +472,7 @@ func (s *Service) Refund(ctx context.Context, orderID, actingCustomer int64, amo
 }
 
 func (s *Service) refundOnce(ctx context.Context, charge *Charge, actingCustomer int64, amountCents int64, idemKey, reason string) (*Refund, error) {
-	if cached, err := s.findRefundByKey(ctx, idemKey); err != nil {
+	if cached, err := s.findRefundByKey(ctx, actingCustomer, idemKey); err != nil {
 		return nil, err
 	} else if cached != nil {
 		return cached, nil
@@ -467,6 +484,23 @@ func (s *Service) refundOnce(ctx context.Context, charge *Charge, actingCustomer
 		return nil, httpx.Wrap(err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Serialise refunds per charge and re-check the remaining amount under the lock:
+	// two concurrent refunds with different keys both passed the earlier check and
+	// together could exceed the charge. Pending refunds count as committed money.
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM charges WHERE id = $1::uuid FOR UPDATE`, charge.ID); err != nil {
+		return nil, httpx.Wrap(err)
+	}
+	var committed int64
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(SUM(amount_cents) FILTER (WHERE status IN ('succeeded','pending')), 0)
+		FROM refunds WHERE charge_id = $1::uuid`, charge.ID).Scan(&committed); err != nil {
+		return nil, httpx.Wrap(err)
+	}
+	if amountCents > charge.AmountCents-committed {
+		return nil, httpx.Conflict(fmt.Sprintf("only %d cents remain refundable on this charge", charge.AmountCents-committed))
+	}
+
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO refunds (charge_id, customer_id, amount_cents, idempotency_key)
 		VALUES ($1::uuid, $2, $3, $4)
@@ -595,13 +629,13 @@ func (s *Service) refundedTotal(ctx context.Context, chargeID string) (int64, er
 	return total, nil
 }
 
-func (s *Service) findRefundByKey(ctx context.Context, idemKey string) (*Refund, error) {
+func (s *Service) findRefundByKey(ctx context.Context, customerID int64, idemKey string) (*Refund, error) {
 	var r Refund
 	err := s.pool.QueryRow(ctx, `
 		SELECT r.id::text, r.charge_id::text, c.order_id, r.customer_id, r.amount_cents, r.status,
 		       r.provider_refund_id, r.failure_reason, r.idempotency_key, r.created_at
 		FROM refunds r JOIN charges c ON c.id = r.charge_id
-		WHERE r.idempotency_key = $1`, idemKey,
+		WHERE r.idempotency_key = $1 AND r.customer_id = $2`, idemKey, customerID,
 	).Scan(&r.ID, &r.ChargeID, &r.OrderID, &r.CustomerID, &r.AmountCents, &r.Status,
 		&r.ProviderRefund, &r.FailureReason, &r.IdempotencyKey, &r.CreatedAt)
 	if err != nil {

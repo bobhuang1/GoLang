@@ -2,6 +2,8 @@ package httpx
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"sync"
 	"time"
@@ -17,6 +19,7 @@ import (
 type IdempotencyGuard struct {
 	mu       sync.Mutex
 	store    map[string]*cachedResponse
+	inFlight map[string]bool
 	ttl      time.Duration
 	maxEntry int
 }
@@ -32,6 +35,7 @@ type cachedResponse struct {
 func NewIdempotencyGuard(ttl time.Duration, maxEntry int) *IdempotencyGuard {
 	g := &IdempotencyGuard{
 		store:    make(map[string]*cachedResponse),
+		inFlight: make(map[string]bool),
 		ttl:      ttl,
 		maxEntry: maxEntry,
 	}
@@ -44,13 +48,24 @@ func NewIdempotencyGuard(ttl time.Duration, maxEntry int) *IdempotencyGuard {
 func (g *IdempotencyGuard) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := r.Header.Get("Idempotency-Key")
-		if key == "" {
+		// Only state-changing POSTs are replayed; a GET carrying the header must always
+		// see fresh data.
+		if key == "" || r.Method != http.MethodPost {
 			next.ServeHTTP(w, r)
 			return
 		}
-		cacheKey := r.Method + " " + r.URL.Path + " " + key
+		// Keys are chosen by clients, so the cache is partitioned by caller: without the
+		// credential in the key, a second customer reusing a key would be served the
+		// first customer's cached response. The token is hashed, never stored as-is.
+		caller := sha256.Sum256([]byte(r.Header.Get("Authorization")))
+		cacheKey := r.Method + " " + r.URL.Path + " " + hex.EncodeToString(caller[:]) + " " + key
 
 		g.mu.Lock()
+		if g.inFlight[cacheKey] {
+			g.mu.Unlock()
+			WriteError(w, Conflict("a request with this Idempotency-Key is still being processed"))
+			return
+		}
 		if cached, ok := g.store[cacheKey]; ok && time.Now().Before(cached.expires) {
 			cached.lastSeen = time.Now()
 			g.mu.Unlock()
@@ -60,22 +75,35 @@ func (g *IdempotencyGuard) Middleware(next http.Handler) http.Handler {
 			_, _ = w.Write(cached.body)
 			return
 		}
+		g.inFlight[cacheKey] = true
 		g.mu.Unlock()
 
 		rec := &captureWriter{header: make(http.Header), status: 200}
-		next.ServeHTTP(rec, r)
+		func() {
+			// Release the in-flight marker even if the handler panics.
+			defer func() {
+				g.mu.Lock()
+				delete(g.inFlight, cacheKey)
+				g.mu.Unlock()
+			}()
+			next.ServeHTTP(rec, r)
+		}()
 
-		g.mu.Lock()
-		g.store[cacheKey] = &cachedResponse{
-			body:     rec.body.Bytes(),
-			status:   rec.status,
-			expires:  time.Now().Add(g.ttl),
-			lastSeen: time.Now(),
+		// Only successful outcomes are replayed. Caching a 4xx/5xx would hand a client
+		// that retries after a transient failure the same failure for the whole TTL.
+		if rec.status >= 200 && rec.status < 300 {
+			g.mu.Lock()
+			g.store[cacheKey] = &cachedResponse{
+				body:     rec.body.Bytes(),
+				status:   rec.status,
+				expires:  time.Now().Add(g.ttl),
+				lastSeen: time.Now(),
+			}
+			if len(g.store) > g.maxEntry {
+				g.evictLocked()
+			}
+			g.mu.Unlock()
 		}
-		if len(g.store) > g.maxEntry {
-			g.evictLocked()
-		}
-		g.mu.Unlock()
 
 		for k, vs := range rec.header {
 			w.Header()[k] = vs
@@ -100,7 +128,7 @@ func (g *IdempotencyGuard) evictLocked() {
 }
 
 func (g *IdempotencyGuard) reaper() {
-	ticker := time.NewTicker(2 * g.ttl)
+	ticker := time.NewTicker(2 * g.ttlSorrogate()) // NewTicker panics on a zero TTL
 	defer ticker.Stop()
 	for range ticker.C {
 		cutoff := time.Now().Add(-g.ttlSorrogate())

@@ -42,14 +42,14 @@ func TestServiceCharge_RestartAfterTransient(t *testing.T) {
 
 	// --- attempt 1: fresh claim that hits a transient provider fault ---
 	// No prior charge for this idempotency key yet -> fresh claim.
-	pool.ExpectQuery(`SELECT id::text.*FROM charges WHERE idempotency_key = \$1`).
-		WithArgs(idemKey).
+	pool.ExpectQuery(`SELECT id::text.*FROM charges WHERE idempotency_key = \$1 AND customer_id = \$2`).
+		WithArgs(idemKey, customerID).
 		WillReturnError(pgx.ErrNoRows)
 
 	// Claim transaction: lock the pending order, then insert the charge.
 	pool.ExpectBegin()
-	pool.ExpectQuery(`SELECT status, total_cents, currency FROM orders WHERE id = \$1 FOR UPDATE`).
-		WithArgs(orderID).
+	pool.ExpectQuery(`SELECT status, total_cents, currency FROM orders WHERE id = \$1 AND customer_id = \$2 FOR UPDATE`).
+		WithArgs(orderID, customerID).
 		WillReturnRows(pgxmock.NewRows([]string{"status", "total_cents", "currency"}).
 			AddRow("pending", amount, currency))
 	pool.ExpectQuery(`INSERT INTO charges .* RETURNING id::text`).
@@ -66,8 +66,8 @@ func TestServiceCharge_RestartAfterTransient(t *testing.T) {
 
 	// --- attempt 2 (restart, after backoff): resume the interrupted charge ---
 	// The pending charge is now visible by idempotency key.
-	pool.ExpectQuery(`SELECT id::text.*FROM charges WHERE idempotency_key = \$1`).
-		WithArgs(idemKey).
+	pool.ExpectQuery(`SELECT id::text.*FROM charges WHERE idempotency_key = \$1 AND customer_id = \$2`).
+		WithArgs(idemKey, customerID).
 		WillReturnRows(pgxmock.NewRows([]string{"id::text", "order_id", "customer_id",
 			"amount_cents", "currency", "status", "provider_charge_id", "failure_reason",
 			"idempotency_key", "created_at"}).

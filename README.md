@@ -71,9 +71,27 @@ passwords below are public.
 `Idempotency-Key` is honored on checkout, charges and refunds in two layers:
 
 - an in-memory replay guard (`internal/httpx`) returns the exact cached
-  response for a retry, and
-- durable `UNIQUE` constraints on `orders/charges/refunds.idempotency_key`
-  guarantee exactly-once semantics across restarts and multi-process runs.
+  response for a retry of a successful POST (failures and GETs are never
+  replayed, and a second request with the same key while the first is still
+  running gets 409), and
+- durable `UNIQUE (customer_id, idempotency_key)` constraints on
+  `orders/charges/refunds` guarantee exactly-once semantics across restarts and
+  multi-process runs.
+
+Keys are client-chosen, so both layers are scoped to the caller: one customer
+reusing another customer's key never sees the other customer's order, charge or
+refund.
+
+## Security notes
+
+- Charges are only accepted for the caller's own orders. Customers can refund
+  their own orders only while the order is `paid` (before fulfilment); later
+  refunds are an admin decision. Refunds are serialised per charge, so
+  concurrent refunds can never exceed the charged amount.
+- Login, 2FA, forgot-password and reset-password are rate limited per client IP
+  (10 per minute, in memory). Five wrong reset codes burn the code.
+- The server refuses to start with the published default `JWT_SECRET` unless
+  `SEED_DEMO=1` (local demo mode).
 
 ## Payments
 

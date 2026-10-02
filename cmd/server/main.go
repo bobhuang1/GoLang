@@ -28,6 +28,14 @@ import (
 func main() {
 	cfg := config.FromEnv()
 
+	// The default signing secret is published in the README; anyone could mint admin
+	// tokens with it. Accept it only in demo mode (SEED_DEMO=1, set by make run and
+	// docker compose).
+	if cfg.JWTSecret == config.DefaultJWTSecret && os.Getenv("SEED_DEMO") != "1" {
+		slog.Error("JWT_SECRET is unset or still the published default; set a strong secret (or SEED_DEMO=1 for a local demo)")
+		os.Exit(1)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

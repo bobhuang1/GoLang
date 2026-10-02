@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/bobhuang1/GoLang/internal/auth"
@@ -53,7 +54,12 @@ func NewService(pool *pgxpool.Pool, c cache.Cache) *Service {
 	return &Service{pool: pool, cache: c}
 }
 
-const passwordResetTTL = 10 * time.Minute
+const (
+	passwordResetTTL = 10 * time.Minute
+	// maxResetAttempts wrong codes burn the code, so the 1-in-a-million guess cannot
+	// be repeated until it lands.
+	maxResetAttempts = 5
+)
 
 // Register creates a new customer account. Reserved emails for the seeded demo
 // accounts cannot be taken.
@@ -194,6 +200,18 @@ func (s *Service) ResetPassword(ctx context.Context, email, code, newPassword st
 		return httpx.Wrap(err)
 	}
 	if string(stored) != code {
+		failKey := "pwdreset-fail:" + email
+		failures := 0
+		if raw, err := s.cache.Get(ctx, failKey); err == nil {
+			failures, _ = strconv.Atoi(string(raw))
+		}
+		failures++
+		if failures >= maxResetAttempts {
+			_ = s.cache.Del(ctx, key)
+			_ = s.cache.Del(ctx, failKey)
+		} else {
+			_ = s.cache.Set(ctx, failKey, []byte(strconv.Itoa(failures)), passwordResetTTL)
+		}
 		return httpx.BadRequest("invalid or expired reset code")
 	}
 
@@ -212,6 +230,7 @@ func (s *Service) ResetPassword(ctx context.Context, email, code, newPassword st
 	}
 	// One-time code consumed.
 	_ = s.cache.Del(ctx, key) // best-effort
+	_ = s.cache.Del(ctx, "pwdreset-fail:"+email)
 	return nil
 }
 

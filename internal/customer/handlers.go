@@ -3,6 +3,7 @@ package customer
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/bobhuang1/GoLang/internal/auth"
 	"github.com/bobhuang1/GoLang/internal/httpx"
@@ -22,9 +23,13 @@ func NewHandler(svc *Service, tokens *auth.TokenManager) *Handler {
 
 // Routes mounts both the /auth and /customers route groups.
 func (h *Handler) Routes(r chi.Router) {
+	// Credential endpoints are throttled per client IP: without a limit the password,
+	// the 6-digit TOTP code and the 6-digit reset code can all be brute-forced.
+	credentials := httpx.NewRateLimiter(10, time.Minute)
+
 	r.Route("/auth", func(r chi.Router) {
-		r.Post("/login", h.login)
-		r.Post("/login/2fa", h.login2FA)
+		r.With(credentials.Middleware).Post("/login", h.login)
+		r.With(credentials.Middleware).Post("/login/2fa", h.login2FA)
 		r.Post("/logout", h.logout)
 
 		r.Group(func(r chi.Router) {
@@ -37,8 +42,8 @@ func (h *Handler) Routes(r chi.Router) {
 
 	r.Route("/customers", func(r chi.Router) {
 		r.Post("/", h.register)
-		r.Post("/forgot-password", h.forgotPassword)
-		r.Post("/reset-password", h.resetPassword)
+		r.With(credentials.Middleware).Post("/forgot-password", h.forgotPassword)
+		r.With(credentials.Middleware).Post("/reset-password", h.resetPassword)
 
 		r.Group(func(r chi.Router) {
 			r.Use(httpx.RequireAuth(h.tokens))
