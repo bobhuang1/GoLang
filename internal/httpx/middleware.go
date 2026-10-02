@@ -79,6 +79,13 @@ func RequireAuth(tokens *auth.TokenManager) func(http.Handler) http.Handler {
 				WriteError(w, Unauthorized("invalid or expired token"))
 				return
 			}
+			// Only a full access token authenticates a request. The 2FA challenge
+			// token proves the password step alone and is redeemable solely at
+			// /auth/login/2fa, which parses it itself.
+			if claims.Kind != auth.TokenKindFull {
+				WriteError(w, Unauthorized("invalid or expired token"))
+				return
+			}
 			ctx := WithUser(r.Context(), &ContextUser{
 				CustomerID: parseSubject(claims.Subject),
 				Email:      claims.Email,

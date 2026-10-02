@@ -7,6 +7,8 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
 	"time"
 
 	"github.com/bobhuang1/GoLang/internal/auth"
@@ -153,25 +155,32 @@ func (s *Service) Delete(ctx context.Context, customerID int64) error {
 	return nil
 }
 
-// ForgotPassword issues a one-time reset code for the email. In a real system
-// the code is emailed; the sample returns it in the response body and stores it
-// in Redis so concurrent reset attempts stay safe across instances.
-func (s *Service) ForgotPassword(ctx context.Context, email string) (string, error) {
+// ForgotPassword issues a one-time reset code for the email and stores it in
+// Redis so concurrent reset attempts stay safe across instances. The code must
+// reach the account owner out of band (email); it is never returned to the
+// caller. Unknown emails succeed silently so the endpoint does not reveal which
+// accounts exist.
+//
+// The sample has no mail relay wired in. Set DEMO_LOG_RESET_CODES=1 to have the
+// code written to the server log for local end-to-end testing.
+func (s *Service) ForgotPassword(ctx context.Context, email string) error {
 	row, err := s.getByEmail(ctx, email)
 	if err != nil || row.DeletedAt != nil {
-		// Uniform answer: do not leak whether the email exists.
-		return "", httpx.BadRequest("account not found")
+		return nil
 	}
 	code, err := randomDigits(6)
 	if err != nil {
-		return "", httpx.Wrap(err)
+		return httpx.Wrap(err)
 	}
 	key := "pwdreset:" + email
 	if err := s.cache.Set(ctx, key, []byte(code), passwordResetTTL); err != nil {
 		// Redis being down degrades the flow instead of crashing it.
-		return "", httpx.Wrap(fmt.Errorf("store reset code: %w", err))
+		return httpx.Wrap(fmt.Errorf("store reset code: %w", err))
 	}
-	return code, nil
+	if os.Getenv("DEMO_LOG_RESET_CODES") == "1" {
+		slog.Info("password reset code issued (demo logging enabled)", "email", email, "code", code)
+	}
+	return nil
 }
 
 // ResetPassword validates the one-time code and rotates the password hash.
@@ -210,6 +219,17 @@ func (s *Service) ResetPassword(ctx context.Context, email, code, newPassword st
 // URL (to seed an authenticator app). The secret is stored in an inactive
 // state; verify2FA activates it.
 func (s *Service) Enroll2FA(ctx context.Context, customerID int64, email string) (secret, otpauthURL string, err error) {
+	// Re-enrolling would overwrite the secret and switch 2FA off without proof of
+	// the current authenticator, so an active 2FA must be disabled (with a valid
+	// code) first.
+	current, err := s.getByID(ctx, customerID)
+	if err != nil {
+		return "", "", err
+	}
+	if current.TOTPEnabled {
+		return "", "", httpx.Conflict("2FA is already enabled; disable it with a valid code before enrolling again")
+	}
+
 	secret, url, err := auth.ProvisionTOTP(email)
 	if err != nil {
 		return "", "", httpx.Wrap(err)

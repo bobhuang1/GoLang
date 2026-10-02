@@ -148,17 +148,15 @@ func (h *Handler) forgotPassword(w http.ResponseWriter, r *http.Request) {
 	if err := httpx.DecodeJSON(w, r, &in); err != nil {
 		return
 	}
-	code, err := h.svc.ForgotPassword(r.Context(), in.Email)
-	if err != nil {
+	if err := h.svc.ForgotPassword(r.Context(), in.Email); err != nil {
 		httpx.WriteError(w, err)
 		return
 	}
-	// Demo only: the code would be emailed. Returning it makes the sample
-	// runnable end-to-end without an SMTP server.
-	httpx.WriteOK(w, map[string]any{
-		"message": "reset code issued",
-		"code":    code,
-		"note":    "demo: the code would normally be emailed to " + in.Email,
+	// The code never travels back to the caller: anyone could otherwise reset any
+	// account knowing only its email. The answer is identical whether or not the
+	// account exists.
+	httpx.WriteOK(w, map[string]string{
+		"message": "if that account exists, a reset code has been sent to its email address",
 	})
 }
 
