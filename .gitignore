@@ -1,6 +1,6 @@
 # Build artifacts
 bin/
-server
+/server
 
 # Env
 .env

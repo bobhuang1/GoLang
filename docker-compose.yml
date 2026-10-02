@@ -29,6 +29,8 @@ services:
       DATABASE_URL: postgres://shop:shop@postgres:5432/shop?sslmode=disable
       REDIS_ADDR: redis:6379
       JWT_SECRET: compose-secret-change-me
+      SEED_DEMO: "1"
+      DEMO_LOG_RESET_CODES: "1"
     ports:
       - "8080:8080"
     depends_on:

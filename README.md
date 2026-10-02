@@ -38,8 +38,10 @@ make run
 make infra-app
 ```
 
-The binary applies the embedded schema, seeds two accounts and five products,
-then listens on `:8080`.
+The binary applies the embedded schema and listens on `:8080`. With
+`SEED_DEMO=1` (set by `make run` and `docker compose`) it also seeds two demo
+accounts and five products. Never set `SEED_DEMO` on a real deployment: the demo
+passwords below are public.
 
 | Account | Email | Password |
 | --- | --- | --- |
@@ -94,6 +96,8 @@ JWT_SECRET              dev-secret-change-me
 JWT_TTL_MINUTES         60
 JWT_CHALLENGE_TTL_MINUTES 5
 MAX_PAYMENT_ATTEMPTS    4
+SEED_DEMO               (unset)  1 = create the demo accounts and products
+DEMO_LOG_RESET_CODES    (unset)  1 = log password-reset codes (no mail relay in the sample)
 PAYMENT_RETRY_BASE_DELAY_MS 100
 ```
 

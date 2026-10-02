@@ -6,7 +6,7 @@ build:
 	go build ./...
 
 run:
-	go run ./cmd/server
+	SEED_DEMO=1 DEMO_LOG_RESET_CODES=1 go run ./cmd/server
 
 test:
 	go test ./...
